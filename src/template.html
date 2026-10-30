@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Énigme des cercles</title>
+<style>
+  :root { --bg: #1d1814; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); }
+  main { max-width: 1000px; margin: 0 auto; padding: 16px; }
+  canvas { width: 100%; height: auto; max-height: calc(100vh - 32px); object-fit: contain; display: block; cursor: pointer;
+           touch-action: manipulation; -webkit-tap-highlight-color: transparent; user-select: none; }
+</style>
+</head>
+<body>
+<main>
+  <canvas id="board" aria-label="Plateau de l'énigme"></canvas>
+</main>
+<script>
+// Cercles mesurés sur l'image (pixels) : x, y du centre, rayon
+const CIRCLES = [
+  // 2 grands
+  [360, 479, 290], [650, 480, 290],
+  // 7 moyens
+  [216, 479, 145], [360, 334, 145], [361, 624, 145], [506, 480, 145],
+  [650, 335, 145], [650, 625, 145], [796, 480, 145],
+  // 6 petits
+  [215, 335, 84], [214, 626, 84], [506, 335, 84], [505, 624, 84], [797, 337, 84], [796, 626, 84],
+].map(([x, y, r]) => ({ x, y, r }));
+const EDGE = 2;          // on inclut le trait du contour dans la rotation
+const ANIM_MS = 220;
+
+const canvas = document.getElementById('board');
+const ctx = canvas.getContext('2d');
+const img = new Image();
+img.src = "__IMAGE__";
+
+let W, H, original, state;     // ImageData
+let stateCanvas;               // copie de l'état pour le dessin
+let hover = null, anim = null, history = [];
+
+img.onload = () => {
+  W = canvas.width = img.naturalWidth;
+  H = canvas.height = img.naturalHeight;
+  stateCanvas = document.createElement('canvas');
+  stateCanvas.width = W; stateCanvas.height = H;
+  const sctx = stateCanvas.getContext('2d');
+  sctx.drawImage(img, 0, 0);
+  original = sctx.getImageData(0, 0, W, H);
+  state = new ImageData(new Uint8ClampedArray(original.data), W, H);
+  draw();
+};
+
+// Rotation exacte d'un quart de tour des pixels du disque (aucune perte de qualité)
+function rotatePixels(c, cw) {
+  const R = c.r + EDGE, R2 = R * R, src = state.data, dst = new Uint8ClampedArray(src);
+  for (let v = -R; v <= R; v++) {
+    for (let u = -R; u <= R; u++) {
+      if (u * u + v * v > R2) continue;
+      const tx = c.x + u, ty = c.y + v;
+      const sx = cw ? c.x + v : c.x - v;
+      const sy = cw ? c.y - u : c.y + u;
+      if (tx < 0 || ty < 0 || tx >= W || ty >= H || sx < 0 || sy < 0 || sx >= W || sy >= H) continue;
+      const t = (ty * W + tx) * 4, s = (sy * W + sx) * 4;
+      dst[t] = src[s]; dst[t + 1] = src[s + 1]; dst[t + 2] = src[s + 2]; dst[t + 3] = src[s + 3];
+    }
+  }
+  state = new ImageData(dst, W, H);
+}
+
+function draw() {
+  stateCanvas.getContext('2d').putImageData(state, 0, 0);
+  ctx.drawImage(stateCanvas, 0, 0);
+  if (anim) {
+    const c = anim.c, R = c.r + EDGE;
+    const p = Math.min(1, (performance.now() - anim.t0) / ANIM_MS);
+    const e = 1 - Math.pow(1 - p, 3);
+    ctx.save();
+    ctx.beginPath(); ctx.arc(c.x, c.y, R, 0, Math.PI * 2); ctx.clip();
+    ctx.translate(c.x, c.y);
+    ctx.rotate((anim.cw ? 1 : -1) * e * Math.PI / 2);
+    ctx.drawImage(stateCanvas, -c.x, -c.y);
+    ctx.restore();
+  }
+  const h = anim ? anim.c : hover;
+  if (h) {
+    ctx.save();
+    ctx.lineWidth = 5;
+    ctx.strokeStyle = 'rgba(255, 196, 64, 0.9)';
+    ctx.shadowColor = 'rgba(255, 180, 40, 0.9)';
+    ctx.shadowBlur = 12;
+    ctx.beginPath(); ctx.arc(h.x, h.y, h.r, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath(); ctx.arc(h.x, h.y, 5, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255, 196, 64, 0.9)'; ctx.fill();
+    ctx.restore();
+  }
+}
+
+function tick() {
+  draw();
+  if (!anim) return;
+  if (performance.now() - anim.t0 >= ANIM_MS) finishAnim();
+  else requestAnimationFrame(tick);
+}
+
+function finishAnim() {
+  if (!anim) return;
+  rotatePixels(anim.c, anim.cw);
+  anim = null;
+  draw();
+}
+
+function rotate(c, cw, record = true) {
+  finishAnim();
+  if (record) history.push({ c, cw });
+  anim = { c, cw, t0: performance.now() };
+  requestAnimationFrame(tick);
+}
+
+// Parmi les cercles qui contiennent le point, on prend celui dont le centre est le plus proche
+function pick(px, py) {
+  let best = null, bestD = Infinity;
+  for (const c of CIRCLES) {
+    const d = Math.hypot(px - c.x, py - c.y);
+    if (d > c.r) continue;
+    if (d < bestD || (d === bestD && c.r < best.r)) { best = c; bestD = d; }
+  }
+  return best;
+}
+
+function toImage(e) {
+  const rect = canvas.getBoundingClientRect();
+  // object-fit: contain -> on tient compte d'éventuelles bandes
+  const scale = Math.min(rect.width / W, rect.height / H);
+  const ox = (rect.width - W * scale) / 2, oy = (rect.height - H * scale) / 2;
+  return [(e.clientX - rect.left - ox) / scale, (e.clientY - rect.top - oy) / scale];
+}
+
+canvas.addEventListener('pointermove', e => {
+  if (!state || e.pointerType === 'touch') return;
+  const c = pick(...toImage(e));
+  if (c !== hover) { hover = c; if (!anim) draw(); }
+});
+canvas.addEventListener('pointerleave', () => { hover = null; if (state && !anim) draw(); });
+canvas.addEventListener('pointerdown', e => {
+  if (!state || (e.button !== 0 && e.button !== 2)) return;
+  const c = pick(...toImage(e));
+  if (!c) return;
+  e.preventDefault();
+  rotate(c, e.button === 0);
+});
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+function undo() {
+  const last = history.pop();
+  if (last) rotate(last.c, !last.cw, false);
+}
+document.addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); undo(); }
+});
+</script>
+</body>
+</html>
